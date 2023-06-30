@@ -1,0 +1,19 @@
+[package]
+name = "collections"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.allocator-api2]
+version = "0.2.15"
+default-features = false
+features = ["alloc"]
+
+[features]
+nightly = ["allocator-api2/nightly"]
+
+[dev-dependencies]
+criterion = { version = "0.5.1" }
+
+[[bench]]
+name = "benches"
+harness = false
