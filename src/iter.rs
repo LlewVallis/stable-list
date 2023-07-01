@@ -4,34 +4,34 @@ use core::ops::Range;
 use core::ptr::NonNull;
 use core::{mem, ptr};
 
-use allocator_api2::alloc::Allocator;
+use allocator_api2::alloc::{Allocator, Global};
 
 use crate::util::{assume_assert, impl_iter};
-use crate::{Block, StableList};
+use crate::{Block, DefaultGrowthStrategy, GrowthStrategy, StableList};
 
-pub struct RawChunksIter<'a, T> {
+pub struct RawChunksIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    strategy: S,
     blocks: &'a [*mut Block],
     indices: Range<usize>,
     last_len: usize,
     _marker: PhantomData<NonNull<T>>,
 }
 
-impl<'a, T> RawChunksIter<'a, T> {
-    pub fn new<A: Allocator>(list: &'a StableList<T, A>) -> Self {
+impl<'a, T, S: GrowthStrategy<T>> RawChunksIter<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a StableList<T, S, A>) -> Self {
         unsafe {
             let blocks = list.block_table.as_ref();
             let blocks = &blocks[..list.used_blocks];
 
             let last_block_len = if blocks.len() > 1 {
-                let blocks_before = blocks.len() as u32 - 1;
-                let elements_before =
-                    StableList::<T>::first_block_capacity() * 2usize.pow(blocks_before - 1);
+                let elements_before = list.strategy.cumulative_capacity(blocks.len() - 1);
                 list.len - elements_before
             } else {
                 list.len
             };
 
             Self {
+                strategy: list.strategy.clone(),
                 blocks,
                 indices: 0..blocks.len(),
                 last_len: last_block_len,
@@ -42,7 +42,7 @@ impl<'a, T> RawChunksIter<'a, T> {
 }
 
 impl_iter! {
-    on = RawChunksIter { 'a, T } where {};
+    on = RawChunksIter { 'a, T, S } where { S: GrowthStrategy<T> };
     inner = indices;
     item = { NonNull<[T]> };
     map = { |this: &mut Self, index: usize| unsafe {
@@ -51,7 +51,7 @@ impl_iter! {
         let block_len = if index == this.blocks.len() - 1 {
             this.last_len
         } else {
-            StableList::<T>::block_capacity(index)
+            this.strategy.block_capacity(index)
         };
 
         assume_assert!(block_len > 0);
@@ -63,6 +63,7 @@ impl_iter! {
     fused = true;
     exact_size = true;
     clone = { |this: &Self| Self {
+        strategy: this.strategy.clone(),
         blocks: this.blocks,
         indices: this.indices.clone(),
         last_len: this.last_len,
@@ -72,13 +73,13 @@ impl_iter! {
     force_send = true;
 }
 
-pub struct ChunksIter<'a, T: 'a> {
-    raw: RawChunksIter<'a, T>,
+pub struct ChunksIter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a T>,
 }
 
-impl<'a, T: 'a> ChunksIter<'a, T> {
-    pub(super) fn new<A: Allocator>(list: &'a StableList<T, A>) -> Self {
+impl<'a, T: 'a, S: GrowthStrategy<T>> ChunksIter<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a StableList<T, S, A>) -> Self {
         Self {
             raw: RawChunksIter::new(list),
             _marker: PhantomData,
@@ -87,7 +88,7 @@ impl<'a, T: 'a> ChunksIter<'a, T> {
 }
 
 impl_iter! {
-    on = ChunksIter { 'a, T } where { T: 'a };
+    on = ChunksIter { 'a, T, S } where { T: 'a, S: GrowthStrategy<T> };
     inner = raw;
     item = { &'a [T] };
     map = { |_this: &mut Self, ptr: NonNull<[T]>|
@@ -106,13 +107,13 @@ impl_iter! {
     force_send = false;
 }
 
-pub struct ChunksIterMut<'a, T: 'a> {
-    raw: RawChunksIter<'a, T>,
+pub struct ChunksIterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: 'a> ChunksIterMut<'a, T> {
-    pub(super) fn new<A: Allocator>(list: &'a mut StableList<T, A>) -> Self {
+impl<'a, T: 'a, S: GrowthStrategy<T>> ChunksIterMut<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a mut StableList<T, S, A>) -> Self {
         Self {
             raw: RawChunksIter::new(list),
             _marker: PhantomData,
@@ -121,7 +122,7 @@ impl<'a, T: 'a> ChunksIterMut<'a, T> {
 }
 
 impl_iter! {
-    on = ChunksIterMut { 'a, T } where { T: 'a };
+    on = ChunksIterMut { 'a, T, S } where { T: 'a, S: GrowthStrategy<T> };
     inner = raw;
     item = { &'a mut [T] };
     map = { |_this: &mut Self, mut ptr: NonNull<[T]>|
@@ -137,15 +138,15 @@ impl_iter! {
     force_send = false;
 }
 
-pub struct RawIter<'a, T> {
-    chunks: RawChunksIter<'a, T>,
+pub struct RawIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    chunks: RawChunksIter<'a, T, S>,
     len: usize,
     front: Range<NonNull<T>>,
     back: Range<NonNull<T>>,
 }
 
-impl<'a, T> RawIter<'a, T> {
-    pub(super) fn new<A: Allocator>(list: &'a StableList<T, A>) -> Self {
+impl<'a, T, S: GrowthStrategy<T>> RawIter<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a StableList<T, S, A>) -> Self {
         let empty = NonNull::dangling()..NonNull::dangling();
 
         Self {
@@ -157,7 +158,7 @@ impl<'a, T> RawIter<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for RawIter<'a, T> {
+impl<'a, T, S: GrowthStrategy<T>> Iterator for RawIter<'a, T, S> {
     type Item = NonNull<T>;
 
     fn next(&mut self) -> Option<NonNull<T>> {
@@ -220,7 +221,7 @@ impl<'a, T> Iterator for RawIter<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for RawIter<'a, T> {
+impl<'a, T, S: GrowthStrategy<T>> DoubleEndedIterator for RawIter<'a, T, S> {
     fn next_back(&mut self) -> Option<NonNull<T>> {
         self.nth_back(0)
     }
@@ -278,11 +279,11 @@ impl<'a, T> DoubleEndedIterator for RawIter<'a, T> {
     }
 }
 
-impl<'a, T> FusedIterator for RawIter<'a, T> {}
+impl<'a, T, S: GrowthStrategy<T>> FusedIterator for RawIter<'a, T, S> {}
 
-impl<'a, T> ExactSizeIterator for RawIter<'a, T> {}
+impl<'a, T, S: GrowthStrategy<T>> ExactSizeIterator for RawIter<'a, T, S> {}
 
-impl<'a, T> Clone for RawIter<'a, T> {
+impl<'a, T, S: GrowthStrategy<T>> Clone for RawIter<'a, T, S> {
     fn clone(&self) -> Self {
         Self {
             chunks: self.chunks.clone(),
@@ -293,17 +294,17 @@ impl<'a, T> Clone for RawIter<'a, T> {
     }
 }
 
-unsafe impl<'a, T> Sync for RawIter<'a, T> {}
+unsafe impl<'a, T, S: GrowthStrategy<T>> Sync for RawIter<'a, T, S> {}
 
-unsafe impl<'a, T> Send for RawIter<'a, T> {}
+unsafe impl<'a, T, S: GrowthStrategy<T>> Send for RawIter<'a, T, S> {}
 
-pub struct Iter<'a, T: 'a> {
-    raw: RawIter<'a, T>,
+pub struct Iter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    raw: RawIter<'a, T, S>,
     _marker: PhantomData<&'a T>,
 }
 
 impl_iter! {
-    on = Iter { 'a, T } where { T: 'a };
+    on = Iter { 'a, T, S } where { T: 'a, S: GrowthStrategy<T> };
     inner = raw;
     item = { &'a T };
     map = { |_this: &mut Self, ptr: NonNull<T>|
@@ -322,8 +323,8 @@ impl_iter! {
     force_send = false;
 }
 
-impl<'a, T> Iter<'a, T> {
-    pub(super) fn new<A: Allocator>(list: &'a StableList<T, A>) -> Self {
+impl<'a, T, S: GrowthStrategy<T>> Iter<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a StableList<T, S, A>) -> Self {
         Self {
             raw: RawIter::new(list),
             _marker: PhantomData,
@@ -331,13 +332,13 @@ impl<'a, T> Iter<'a, T> {
     }
 }
 
-pub struct IterMut<'a, T: 'a> {
-    raw: RawIter<'a, T>,
+pub struct IterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+    raw: RawIter<'a, T, S>,
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<'a, T> IterMut<'a, T> {
-    pub(super) fn new<A: Allocator>(list: &'a mut StableList<T, A>) -> Self {
+impl<'a, T, S: GrowthStrategy<T>> IterMut<'a, T, S> {
+    pub(super) fn new<A: Allocator>(list: &'a mut StableList<T, S, A>) -> Self {
         Self {
             raw: RawIter::new(list),
             _marker: PhantomData,
@@ -346,7 +347,7 @@ impl<'a, T> IterMut<'a, T> {
 }
 
 impl_iter! {
-    on = IterMut { 'a, T } where { T: 'a };
+    on = IterMut { 'a, T, S } where { T: 'a, S: GrowthStrategy<T> };
     inner = raw;
     item = { &'a mut T };
     map = { |_this: &mut Self, mut ptr: NonNull<T>|
@@ -362,44 +363,46 @@ impl_iter! {
     force_send = false;
 }
 
-pub struct IntoIter<T, A: Allocator> {
+pub struct IntoIter<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>, A: Allocator = Global> {
     alloc: A,
-    raw: RawIter<'static, T>,
+    raw: RawIter<'static, T, S>,
     _marker: PhantomData<T>,
 }
 
-impl<T, A: Allocator> IntoIter<T, A> {
-    pub(super) fn new(list: StableList<T, A>) -> Self {
+impl<T, S: GrowthStrategy<T>, A: Allocator> IntoIter<T, S, A> {
+    pub(super) fn new(list: StableList<T, S, A>) -> Self {
         unsafe {
             let raw = RawIter::new(&list);
-            let raw = mem::transmute::<_, RawIter<'static, T>>(raw);
+            let raw = mem::transmute::<_, RawIter<'static, T, S>>(raw);
 
             let alloc = ptr::read(&list.alloc);
             mem::forget(list);
 
             Self {
-                raw,
                 alloc,
+                raw,
                 _marker: PhantomData,
             }
         }
     }
 }
 
-impl<T, A: Allocator> Drop for IntoIter<T, A> {
+impl<T, S: GrowthStrategy<T>, A: Allocator> Drop for IntoIter<T, S, A> {
     fn drop(&mut self) {
         unsafe {
             for ptr in self.raw.by_ref() {
                 ptr::drop_in_place(ptr.as_ptr());
             }
 
-            StableList::<T, A>::free_blocks(&self.alloc, NonNull::from(self.raw.chunks.blocks));
+            let strategy = &self.raw.chunks.strategy;
+            let block_table = NonNull::from(self.raw.chunks.blocks);
+            StableList::<T, S, A>::free_blocks(strategy, &self.alloc, block_table);
         }
     }
 }
 
 impl_iter! {
-    on = IntoIter { T, A } where { A: Allocator };
+    on = IntoIter { T, S, A } where { S: GrowthStrategy<T>, A: Allocator };
     inner = raw;
     item = { T };
     map = { |_this: &mut Self, ptr: NonNull<T>|

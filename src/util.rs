@@ -80,6 +80,7 @@ macro_rules! impl_iter {
     };
 }
 
+use core::mem;
 pub(crate) use __if;
 pub(crate) use impl_iter;
 
@@ -117,4 +118,8 @@ impl<T, E> UnwrapExt<T> for Result<T, E> {
         assume_assert!(self.is_ok());
         self.unwrap_unchecked()
     }
+}
+
+pub fn is_zst<T>() -> bool {
+    mem::size_of::<T>() == 0
 }
