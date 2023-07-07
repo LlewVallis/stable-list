@@ -80,8 +80,8 @@ macro_rules! impl_iter {
     };
 }
 
-use core::mem;
 pub(crate) use __if;
+use core::mem;
 pub(crate) use impl_iter;
 
 macro_rules! assume_assert {

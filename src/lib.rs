@@ -16,7 +16,7 @@ use core::{fmt, ptr};
 
 use allocator_api2::alloc::{AllocError, Allocator, Global};
 
-pub use growth_strategy::{GrowthStrategy, DoublingGrowthStrategy};
+pub use growth_strategy::{DoublingGrowthStrategy, GrowthStrategy};
 pub use iter::{ChunksIter, ChunksIterMut, IntoIter, Iter, IterMut};
 
 use crate::iter::RawIter;
@@ -316,7 +316,8 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         let block_index = self.block_table.len();
         assume_assert!(self.used_blocks == block_index);
 
-        let (layout, block_table_offset) = Self::layout_block(&self.strategy, block_index).unwrap_assume();
+        let (layout, block_table_offset) =
+            Self::layout_block(&self.strategy, block_index).unwrap_assume();
 
         let allocation = match self.alloc.allocate(layout) {
             Ok(allocation) => allocation.as_ptr() as *mut u8,
@@ -338,11 +339,17 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         Ok(())
     }
 
-    unsafe fn layout_block(strategy: &S, block_index: usize) -> Result<(Layout, usize), LayoutError> {
+    unsafe fn layout_block(
+        strategy: &S,
+        block_index: usize,
+    ) -> Result<(Layout, usize), LayoutError> {
         Self::layout_block_with_capacity(strategy.block_capacity(block_index), block_index)
     }
 
-    unsafe fn layout_block_with_capacity(capacity: usize, block_index: usize) -> Result<(Layout, usize), LayoutError> {
+    fn layout_block_with_capacity(
+        capacity: usize,
+        block_index: usize,
+    ) -> Result<(Layout, usize), LayoutError> {
         assert!(!is_zst::<T>());
 
         let elements_layout = Layout::array::<T>(capacity)?;
@@ -514,21 +521,24 @@ impl<T: Ord, S: GrowthStrategy<T>, A: Allocator> Ord for StableList<T, S, A> {
     }
 }
 
-unsafe impl<T: Send> Send for StableList<T> {}
+unsafe impl<T: Send, S: GrowthStrategy<T> + Send, A: Allocator + Send> Send for StableList<T, S, A> {}
 
-unsafe impl<T: Sync> Sync for StableList<T> {}
+unsafe impl<T: Sync, S: GrowthStrategy<T> + Sync, A: Allocator + Sync> Sync for StableList<T, S, A> {}
 
 #[cfg(test)]
 mod test {
     use alloc::sync::Arc;
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::fmt::Debug;
-    use core::slice;
-    use core::sync::atomic::{AtomicUsize, Ordering};
     use allocator_api2::alloc::Global;
+    use core::fmt::Debug;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{iter, slice};
 
-    use crate::{ChunksIter, DefaultGrowthStrategy, DoublingGrowthStrategy, GrowthStrategy, Iter, StableList};
+    use crate::{
+        ChunksIter, DefaultGrowthStrategy, DoublingGrowthStrategy, GrowthStrategy, Iter, StableList,
+    };
+    use crate::growth_strategy::FlatGrowthStrategy;
 
     struct Model<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
         list: StableList<T, S>,
@@ -549,6 +559,7 @@ mod test {
             }
         }
 
+        #[track_caller]
         pub fn push(&mut self, value: T)
         where
             T: Clone,
@@ -557,6 +568,7 @@ mod test {
             self.vec.push(value);
         }
 
+        #[track_caller]
         pub fn set(&mut self, index: usize, value: T)
         where
             T: Clone,
@@ -565,11 +577,13 @@ mod test {
             self.vec[index] = value;
         }
 
+        #[track_caller]
         pub fn extend<I: IntoIterator<Item = T> + Clone>(&mut self, iter: I) {
             self.list.extend(iter.clone());
             self.vec.extend(iter)
         }
 
+        #[track_caller]
         pub fn pop(&mut self)
         where
             T: Eq + Debug,
@@ -577,6 +591,7 @@ mod test {
             assert_eq!(self.list.pop(), self.vec.pop());
         }
 
+        #[track_caller]
         pub fn insert(&mut self, index: usize, value: T)
         where
             T: Clone,
@@ -585,6 +600,7 @@ mod test {
             self.vec.insert(index, value);
         }
 
+        #[track_caller]
         pub fn remove(&mut self, index: usize)
         where
             T: Eq + Debug,
@@ -592,10 +608,12 @@ mod test {
             assert_eq!(self.list.remove(index), self.vec.remove(index));
         }
 
+        #[track_caller]
         pub fn check_len(&self) {
             assert_eq!(self.list.len(), self.vec.len());
         }
 
+        #[track_caller]
         pub fn check_index_equality(&self, index: usize)
         where
             T: Eq + Debug,
@@ -603,6 +621,7 @@ mod test {
             assert_eq!(self.list.get(index), self.vec.get(index));
         }
 
+        #[track_caller]
         pub fn check_all_indicies_equality(&self)
         where
             T: Eq + Debug,
@@ -612,6 +631,7 @@ mod test {
             }
         }
 
+        #[track_caller]
         pub fn check_iter_equality(&self)
         where
             T: Eq + Debug,
@@ -619,6 +639,7 @@ mod test {
             assert!(Iterator::eq(self.list.iter(), self.vec.iter()))
         }
 
+        #[track_caller]
         pub fn all_checks(&self)
         where
             T: Eq + Debug,
@@ -628,6 +649,7 @@ mod test {
             self.check_iter_equality();
         }
 
+        #[track_caller]
         pub fn iter(&self) -> ModelIter<T, S> {
             let result = ModelIter {
                 list: self.list.iter(),
@@ -646,6 +668,7 @@ mod test {
     }
 
     impl<'a, T, S: GrowthStrategy<T>> ModelIter<'a, T, S> {
+        #[track_caller]
         pub fn next(&mut self)
         where
             T: Debug + Eq,
@@ -654,6 +677,7 @@ mod test {
             self.check_len();
         }
 
+        #[track_caller]
         pub fn next_back(&mut self)
         where
             T: Debug + Eq,
@@ -662,6 +686,7 @@ mod test {
             self.check_len();
         }
 
+        #[track_caller]
         pub fn nth(&mut self, n: usize)
         where
             T: Debug + Eq,
@@ -670,6 +695,7 @@ mod test {
             self.check_len();
         }
 
+        #[track_caller]
         pub fn nth_back(&mut self, n: usize)
         where
             T: Debug + Eq,
@@ -678,6 +704,7 @@ mod test {
             self.check_len();
         }
 
+        #[track_caller]
         fn check_len(&self) {
             assert_eq!(self.list.len(), self.vec.len());
             assert_eq!(self.list.size_hint(), self.vec.size_hint());
@@ -1079,21 +1106,46 @@ mod test {
     }
 
     #[test]
-    fn custom_doubling_initial_capacity() {
+    fn custom_initial_capacity() {
         macro_rules! case {
-            ($cap:literal) => {
-                let mut model = Model::new_with(DoublingGrowthStrategy::<_, $cap>::default());
-                model.extend(0..100);
+            ($cap:literal, $values:expr) => {
+                let mut model = Model::new_with(DoublingGrowthStrategy::<_, $cap>::new());
+                model.extend($values);
                 model.all_checks();
             };
         }
 
-        case!(1);
-        case!(2);
-        case!(4);
-        case!(8);
-        case!(16);
-        case!(32);
+        case!(1, 0..100);
+        case!(2, 0..100);
+        case!(4, 0..100);
+        case!(8, 0..100);
+        case!(16, 0..100);
+        case!(32, 0..100);
+
+        case!(8, iter::repeat(()).take(100));
+    }
+
+    #[test]
+    fn flat_growth_strategy() {
+        macro_rules! case {
+            ($cap:literal, $values:expr) => {
+                let mut model = Model::new_with(FlatGrowthStrategy::<_, $cap>::new());
+                model.extend($values);
+                model.all_checks();
+            };
+        }
+
+        case!(0, 0..100);
+        case!(1, 0..100);
+        case!(2, 0..100);
+        case!(3, 0..100);
+        case!(4, 0..100);
+        case!(5, 0..100);
+
+        case!(100, 0..100);
+        case!(128, 0..100);
+
+        case!(25, iter::repeat(()).take(100));
     }
 
     #[allow(clippy::extra_unused_lifetimes)]

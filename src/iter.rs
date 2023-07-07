@@ -75,7 +75,7 @@ impl_iter! {
 
 pub struct ChunksIter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
-    _marker: PhantomData<&'a T>,
+    _marker: PhantomData<&'a (T, S)>,
 }
 
 impl<'a, T: 'a, S: GrowthStrategy<T>> ChunksIter<'a, T, S> {
@@ -109,7 +109,7 @@ impl_iter! {
 
 pub struct ChunksIterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
-    _marker: PhantomData<&'a mut T>,
+    _marker: PhantomData<&'a mut (T, S)>,
 }
 
 impl<'a, T: 'a, S: GrowthStrategy<T>> ChunksIterMut<'a, T, S> {
@@ -334,7 +334,7 @@ impl<'a, T, S: GrowthStrategy<T>> Iter<'a, T, S> {
 
 pub struct IterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawIter<'a, T, S>,
-    _marker: PhantomData<&'a mut T>,
+    _marker: PhantomData<&'a mut (T, S)>,
 }
 
 impl<'a, T, S: GrowthStrategy<T>> IterMut<'a, T, S> {
@@ -366,7 +366,7 @@ impl_iter! {
 pub struct IntoIter<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>, A: Allocator = Global> {
     alloc: A,
     raw: RawIter<'static, T, S>,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<(T, S, A)>,
 }
 
 impl<T, S: GrowthStrategy<T>, A: Allocator> IntoIter<T, S, A> {
