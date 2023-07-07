@@ -77,6 +77,12 @@ macro_rules! impl_iter {
             ($clone);
             unsafe impl<$($params)*> ::core::marker::Send for $name<$($params)*> where $($bounds)* {}
         }
+
+        impl<$($params)*> ::core::fmt::Debug for $name<$($params)*> where $($bounds)* {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+                f.write_str(stringify!($name))
+            }
+        }
     };
 }
 
