@@ -117,12 +117,20 @@ impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACIT
         let mut capacity = Self::FIRST_BLOCK_CAPACITY;
 
         loop {
-            if StableList::<T>::layout_block(capacity).is_ok() {
-                count += 1;
-                capacity *= 2;
-            } else {
+            if count == usize::BITS as usize {
                 return count;
             }
+
+            if capacity.checked_mul(2).is_none() {
+                return count;
+            }
+
+            if StableList::<T>::layout_block(capacity).is_err() {
+                return count;
+            }
+
+            capacity *= 2;
+            count += 1;
         }
     }
 }
@@ -146,11 +154,6 @@ impl<T, const INITIAL_CAPACITY: usize> GrowthStrategy<T>
 
     unsafe fn cumulative_capacity(&self, blocks: usize) -> usize {
         assume_assert!(blocks <= self.max_blocks());
-
-        if is_zst::<T>() {
-            return if blocks == 0 { 0 } else { usize::MAX };
-        }
-
         Self::FIRST_BLOCK_CAPACITY * (1usize << blocks >> 1)
     }
 
