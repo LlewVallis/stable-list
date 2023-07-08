@@ -1,6 +1,7 @@
 #![doc = include_str!("doc.md")]
 #![cfg_attr(not(any(test, doc)), no_std)]
 #![cfg_attr(feature = "nightly", feature(allocator_api))]
+#![warn(missing_debug_implementations, missing_docs)]
 
 extern crate alloc;
 
@@ -16,7 +17,7 @@ use core::{fmt, ptr};
 
 use allocator_api2::alloc::{AllocError, Allocator, Global};
 
-pub use growth_strategy::{DoublingGrowthStrategy, GrowthStrategy};
+pub use growth_strategy::*;
 pub use iter::{ChunksIter, ChunksIterMut, IntoIter, Iter, IterMut};
 
 use crate::iter::RawIter;
@@ -28,6 +29,9 @@ mod util;
 
 const ZST_BLOCK_TABLE: &[*mut Block] = &[NonNull::dangling().as_ptr()];
 
+/// The default strategy used by a `StableList`.
+///
+/// See [`DoublingGrowthStrategy`].
 pub type DefaultGrowthStrategy<T> = DoublingGrowthStrategy<T>;
 
 #[doc = include_str!("doc.md")]
@@ -51,12 +55,33 @@ impl<T> Default for StableList<T> {
 }
 
 impl<T> StableList<T> {
+    /// Create a new `StableList` with the default growth strategy and the global allocator.
+    ///
+    /// Use [`new_with`](StableList::new_with) for more control over growth and allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let new_list = StableList::<u32>::new();
+    /// ```
     pub fn new() -> Self {
         Self::new_with(DoublingGrowthStrategy::default(), Global)
     }
 }
 
 impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
+    /// Create a new `StableList` with a custom growth strategy and allocator.
+    ///
+    /// Just use [`new`](StableList::new) if you want the defaults.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use allocator_api2::alloc::Global;
+    /// # use collections::{FlatGrowthStrategy, StableList};
+    /// let new_list = StableList::<u32, _, _>::new_with(FlatGrowthStrategy::default(), Global);
+    /// ```
     pub fn new_with(strategy: S, alloc: A) -> Self {
         Self {
             alloc,
@@ -70,22 +95,80 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
     }
 
+    /// Access the allocator used by the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use allocator_api2::alloc::Global;
+    /// # use collections::StableList;
+    /// let list = StableList::<u32>::new();
+    /// list.allocator(); // Equals `Global`
+    /// ```
     pub fn allocator(&self) -> &A {
         &self.alloc
     }
 
+    /// Returns the number of elements in the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert_eq!(list.len(), 0);
+    ///
+    /// list.push(1);
+    /// assert_eq!(list.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` if the list contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert!(list.is_empty());
+    ///
+    /// list.push(1);
+    /// assert!(!list.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Returns a reference to the element located at the index, or `None` if the index is out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert_eq!(list.get(0), None);
+    ///
+    /// list.push(1);
+    /// assert_eq!(list.get(0), Some(&1));
+    /// ```
     pub fn get(&self, index: usize) -> Option<&T> {
         unsafe { self.get_ptr(index).map(|ptr| &*ptr) }
     }
 
+    /// Returns a mutable reference to the element located at the index, or `None` if the index is out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert_eq!(list.get_mut(0), None);
+    ///
+    /// list.push(1);
+    /// assert_eq!(list.get_mut(0), Some(&mut 1));
+    /// ```
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         unsafe { self.get_ptr(index).map(|ptr| &mut *ptr) }
     }
@@ -107,11 +190,70 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
     }
 
+    /// Adds an element to the end of the list.
+    ///
+    /// # Panics
+    ///
+    /// 1. If the list is at maximum capacity.
+    ///    The maximum capacity is influenced by the element size, growth strategy and the platforms pointer width.
+    ///    Barring extreme circumstances, the maximum capacity should be big enough.
+    /// 2. If the allocator fails to allocate memory required for the new element.
+    ///
+    /// If you want to recover from the second case, use [`try_push`](StableList::try_push).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// list.push(1);
+    /// list.push(2);
+    ///
+    /// assert_eq!(list[0], 1);
+    /// assert_eq!(list[1], 2);
+    /// ```
     pub fn push(&mut self, value: T) {
         self.try_push_internal(value)
             .unwrap_or_else(|(_, layout)| handle_alloc_error(layout))
     }
 
+    /// Adds an element to the end of the list, handling memory allocation failure gracefully.
+    ///
+    /// # Panics
+    ///
+    /// Although allocation failure won't panic, `try_push` still panics if the list is at maximum capacity.
+    /// See [`push`](StableList::push#Panics).
+    ///
+    /// # Examples
+    ///
+    /// We generally don't expect allocation to fail:
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert!(list.try_push(1).is_ok());
+    /// ```
+    ///
+    /// But it might:
+    ///
+    /// ```
+    /// # use std::alloc::Layout;
+    /// # use std::ptr::NonNull;
+    /// # use allocator_api2::alloc::{Allocator, AllocError};
+    /// # use collections::{DefaultGrowthStrategy, StableList};
+    /// struct DummyAllocator;
+    ///
+    /// unsafe impl Allocator for DummyAllocator {
+    ///     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    ///         Err(AllocError)
+    ///     }
+    ///
+    ///     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {}
+    /// }
+    ///
+    /// let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAllocator);
+    /// assert!(list.try_push(1).is_err());
+    /// ```
     pub fn try_push(&mut self, value: T) -> Result<(), AllocError> {
         self.try_push_internal(value).map_err(|(err, _)| err)
     }
@@ -128,6 +270,45 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         Ok(())
     }
 
+    /// Like [`extend`](StableList::extend), but with graceful handling of allocation failure.
+    ///
+    /// This method is to [`extend`](StableList::extend) as [`try_push`](StableList::try_push) is to [`push`](StableList::push).
+    /// If the method fails, the iterator and list are left in valid but unspecified states.
+    ///
+    /// # Panics
+    ///
+    /// See [`try_push`](StableList::try_push#Panics).
+    ///
+    /// # Examples
+    ///
+    /// We generally don't expect allocation to fail:
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert!(list.try_extend(0..100).is_ok());
+    /// ```
+    ///
+    /// But it might:
+    ///
+    /// ```
+    /// # use std::alloc::Layout;
+    /// # use std::ptr::NonNull;
+    /// # use allocator_api2::alloc::{Allocator, AllocError};
+    /// # use collections::{DefaultGrowthStrategy, StableList};
+    /// struct DummyAllocator;
+    ///
+    /// unsafe impl Allocator for DummyAllocator {
+    ///     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    ///         Err(AllocError)
+    ///     }
+    ///
+    ///     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {}
+    /// }
+    ///
+    /// let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAllocator);
+    /// assert!(list.try_extend(0..100).is_err());
+    /// ```
     pub fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), AllocError> {
         self.try_extend_internal(iter).map_err(|(err, _)| err)
     }
@@ -166,6 +347,21 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         self.next_free = NonNull::new_unchecked(self.next_free.as_ptr().add(1));
     }
 
+    /// Removes and returns the last element in the list, if it exists.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    ///
+    /// list.push(1);
+    /// list.push(2);
+    ///
+    /// assert_eq!(list.pop(), Some(2));
+    /// assert_eq!(list.pop(), Some(1));
+    /// assert_eq!(list.pop(), None);
+    /// ```
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -212,11 +408,70 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         assume_assert!(self.len == self.capacity);
     }
 
+    /// Inserts an element at a specific index, shifting elements after it to the right.
+    ///
+    /// Note that this method is a lot slower than [`push`](StableList::push), which `StableList` is optimized for.
+    /// Also keep in mind that the memory address of any elements to the right of the index will change.
+    ///
+    /// # Panics
+    ///
+    /// See [`push`](StableList::push#Panics).
+    /// Also, the index must be lesser or equal to the length of the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    ///
+    /// list.push(10);
+    /// list.push(30);
+    /// list.insert(1, 20);
+    ///
+    /// assert_eq!(list, StableList::from_iter([10, 20, 30]));
+    /// ```
     pub fn insert(&mut self, index: usize, value: T) {
         self.try_insert_internal(index, value)
             .unwrap_or_else(|(_, layout)| handle_alloc_error(layout))
     }
 
+    /// Like [`insert`](StableList::insert), but with graceful handling of allocation failure.
+    ///
+    /// # Panics
+    ///
+    /// See [`try_push`](StableList::try_push#Panics).
+    /// Also, the index must be lesser or equal to the length of the list.
+    ///
+    /// # Examples
+    ///
+    /// We generally don't expect allocation to fail:
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// assert!(list.try_insert(0, 1).is_ok());
+    /// ```
+    ///
+    /// But it might:
+    ///
+    /// ```
+    /// # use std::alloc::Layout;
+    /// # use std::ptr::NonNull;
+    /// # use allocator_api2::alloc::{Allocator, AllocError};
+    /// # use collections::{DefaultGrowthStrategy, StableList};
+    /// struct DummyAllocator;
+    ///
+    /// unsafe impl Allocator for DummyAllocator {
+    ///     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    ///         Err(AllocError)
+    ///     }
+    ///
+    ///     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {}
+    /// }
+    ///
+    /// let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAllocator);
+    /// assert!(list.try_insert(0, 1).is_err());
+    /// ```
     pub fn try_insert(&mut self, index: usize, value: T) -> Result<(), AllocError> {
         self.try_insert_internal(index, value)
             .map_err(|(err, _)| err)
@@ -252,6 +507,22 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
     }
 
+    /// Removes and returns the element at a specific index, shifting elements after it to the left.
+    ///
+    /// # Panics
+    ///
+    /// An element must exist at the index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::from_iter([1, 2, 3]);
+    ///
+    /// assert_eq!(list.remove(0), 1);
+    /// assert_eq!(list.remove(1), 3);
+    /// assert_eq!(list.remove(0), 2);
+    /// ```
     pub fn remove(&mut self, index: usize) -> T {
         if index >= self.len {
             panic!("index out of bounds (index={}, len={})", index, self.len);
@@ -367,18 +638,84 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         self.block_table = NonNull::new_unchecked(new_table);
     }
 
+    /// Returns an iterator over contiguous ranges of elements from the list.
+    ///
+    /// Use [`iter`](StableList::iter) if you want an iterator over each element.
+    ///
+    /// This method guarantees that for any `list`:
+    /// ```
+    /// # use collections::StableList;
+    /// # let list = StableList::from_iter([1, 2, 3]);
+    /// # assert!(
+    /// Iterator::eq(list.chunks().flatten(), list.iter())
+    /// # );
+    /// ```
+    ///
+    /// So, each element appears in exactly one chunk, and order is preserved in and between chunks.
+    /// The chunks returned by this method are the same as the blocks produced by the growth strategy.
+    ///
+    /// # Examples
+    ///
+    /// Doubling growth:
+    ///
+    /// ```
+    /// # use allocator_api2::alloc::Global;
+    /// # use collections::{DoublingGrowthStrategy, StableList};
+    /// let mut list = StableList::new_with(DoublingGrowthStrategy::<_, 1>::new(), Global);
+    /// list.extend(0..16);
+    ///
+    /// let expected: [&[i32]; 5] = [
+    ///     &[0], &[1], &[2, 3], &[4, 5, 6, 7],
+    ///     &[8, 9, 10, 11, 12, 13, 14, 15]
+    /// ];
+    ///
+    /// assert!(Iterator::eq(list.chunks(), expected));
+    /// ```
+    ///
+    /// Flat growth:
+    ///
+    /// ```
+    /// # use allocator_api2::alloc::Global;
+    /// # use collections::{FlatGrowthStrategy, StableList};
+    /// let mut list = StableList::new_with(FlatGrowthStrategy::<_, 4>::new(), Global);
+    /// list.extend(0..16);
+    ///
+    /// let expected = [&[0, 1, 2, 3], &[4, 5, 6, 7], &[8, 9, 10, 11], &[12, 13, 14, 15]];
+    ///
+    /// assert!(Iterator::eq(list.chunks(), expected));
+    /// ```
     pub fn chunks(&self) -> ChunksIter<T, S> {
         ChunksIter::new(self)
     }
 
+    /// Like [`chunks`](StableList::chunks), but returning mutable slices.
+    ///
+    /// See [`chunks`](StableList::chunks) for more information.
     pub fn chunks_mut(&mut self) -> ChunksIterMut<T, S> {
         ChunksIterMut::new(self)
     }
 
+    /// Returns an iterator over each item in the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let list = StableList::from_iter([1, 2, 3]);
+    /// let mut iter = list.iter();
+    ///
+    /// assert_eq!(iter.next(), Some(&1));
+    /// assert_eq!(iter.next(), Some(&2));
+    /// assert_eq!(iter.next(), Some(&3));
+    /// assert_eq!(iter.next(), None);
+    /// ```
     pub fn iter(&self) -> Iter<T, S> {
         Iter::new(self)
     }
 
+    /// Like [`iter`](StableList::iter), but returning mutable references.
+    ///
+    /// See [`iter`](StableList::iter) for more information.
     pub fn iter_mut(&mut self) -> IterMut<T, S> {
         IterMut::new(self)
     }
@@ -410,6 +747,16 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> Drop for StableList<T, S, A> {
 }
 
 impl<T, S: GrowthStrategy<T>, A: Allocator> Extend<T> for StableList<T, S, A> {
+    /// Extends the list with zero or more elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut list = StableList::new();
+    /// list.extend(0..5);
+    /// assert_eq!(list, StableList::from_iter([0, 1, 2, 3, 4]));
+    /// ```
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.try_extend_internal(iter)
             .unwrap_or_else(|(_, layout)| handle_alloc_error(layout))
@@ -417,6 +764,20 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> Extend<T> for StableList<T, S, A> {
 }
 
 impl<T> FromIterator<T> for StableList<T> {
+    /// Creates a new list with the elements from an iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let mut expected = StableList::new();
+    /// let actual = StableList::from_iter([1, 2]);
+    ///
+    /// expected.push(1);
+    /// expected.push(2);
+    ///
+    /// assert_eq!(expected, actual);
+    /// ```
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut list = Self::default();
         list.extend(iter);
@@ -428,6 +789,10 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> IntoIterator for StableList<T, S, A>
     type Item = T;
     type IntoIter = IntoIter<T, S, A>;
 
+    /// Converts the list into an iterator.
+    ///
+    /// The iterator returns each element by value.
+    /// When dropped, the returned iterator drops the rest of the elements.
     fn into_iter(self) -> IntoIter<T, S, A> {
         IntoIter::new(self)
     }
@@ -521,9 +886,15 @@ impl<T: Ord, S: GrowthStrategy<T>, A: Allocator> Ord for StableList<T, S, A> {
     }
 }
 
-unsafe impl<T: Send, S: GrowthStrategy<T> + Send, A: Allocator + Send> Send for StableList<T, S, A> {}
+unsafe impl<T: Send, S: GrowthStrategy<T> + Send, A: Allocator + Send> Send
+    for StableList<T, S, A>
+{
+}
 
-unsafe impl<T: Sync, S: GrowthStrategy<T> + Sync, A: Allocator + Sync> Sync for StableList<T, S, A> {}
+unsafe impl<T: Sync, S: GrowthStrategy<T> + Sync, A: Allocator + Sync> Sync
+    for StableList<T, S, A>
+{
+}
 
 #[cfg(test)]
 mod test {
@@ -535,10 +906,10 @@ mod test {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use core::{iter, slice};
 
+    use crate::growth_strategy::FlatGrowthStrategy;
     use crate::{
         ChunksIter, DefaultGrowthStrategy, DoublingGrowthStrategy, GrowthStrategy, Iter, StableList,
     };
-    use crate::growth_strategy::FlatGrowthStrategy;
 
     struct Model<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
         list: StableList<T, S>,

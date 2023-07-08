@@ -78,7 +78,18 @@ Thankfully, iterating over a `StableList` is not implemented in terms of indexin
 
 In deciding how large each buffer should be, it is important to keep the performance of random accesses in mind.
 If buffers where sized randomly, indexing would require a binary search over all the buffer sizes.
-Instead, a doubling strategy is used, where the first buffer has a statically known size, and each subsequent buffer doubles the total capacity of the list.
+Instead, a doubling strategy is used by default, where the first buffer has a statically known size, and each subsequent buffer doubles the total capacity of the list.
 Although this is rigid, it allows indexing to be implemented fairly quickly with a bit of branchless bit-hacking.
+
+# Configuration
+
+Two things can be configured via generic parameters on `StableList<T, S, A>`: the growth strategy and allocator (the `S` and `A` respectively).
+
+The growth strategy must currently be one of the built-in supported options - either doubling or flat (linear) growth.
+See the docs for [`DoublingGrowthStrategy`] and [`FlatGrowthStrategy`] for more information.
+The default growth strategy is designed to work decently with whatever you throw at it.
+
+The allocator parameter controls where the list gets its memory from.
+See the [`allocator-api2` crate](https://crates.io/crates/allocator-api2) for more info.
 
 [^fast]: For some definition of fast

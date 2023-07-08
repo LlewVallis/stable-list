@@ -6,6 +6,13 @@ use crate::growth_strategy::private::Sealed;
 use crate::util::{assume_assert, is_zst};
 use crate::StableList;
 
+/// A strategy used by a [`StableList`] to dynamically expand.
+///
+/// The [default growth strategy](crate::DefaultGrowthStrategy) should work well, but the structs implementing this trait can be used to tune performance.
+/// Custom implementations of this trait are not supported, and the methods of the trait should not be called directly.
+/// Specifically, the methods of this trait are considered an implementation detail and may be changed at will.
+///
+/// See [`DoublingGrowthStrategy`] and [`FlatGrowthStrategy`].
 pub trait GrowthStrategy<T>: Clone + Sealed {
     #[doc(hidden)]
     fn max_blocks(&self) -> usize;
@@ -23,6 +30,11 @@ pub trait GrowthStrategy<T>: Clone + Sealed {
     unsafe fn translate_index(&self, index: usize) -> (usize, usize);
 }
 
+/// Doubles the capacity of the list whenever it runs out of memory.
+///
+/// The const-generic parameter may be used to specify how many elements reside in the first block that is allocated.
+/// If set to `0` (the default), a reasonable value is determined based on the size of the element.
+/// If a non-default initial capacity is specified, it must be a power of two.
 pub struct DoublingGrowthStrategy<T, const INITIAL_CAPACITY: usize = 0> {
     _marker: PhantomData<fn() -> T>,
 }
@@ -40,10 +52,15 @@ impl<T> Default for DoublingGrowthStrategy<T> {
 }
 
 impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACITY> {
+    /// Construct a new `DoublingGrowthStrategy`.
+    ///
+    /// # Panics
+    ///
+    /// If the initial capacity isn't either zero or a power of two.
     pub fn new() -> Self {
         assert!(
             INITIAL_CAPACITY == 0 || INITIAL_CAPACITY.is_power_of_two(),
-            "initial capacity must be a power of two"
+            "initial capacity must be zero or a power of two"
         );
 
         Self {
@@ -154,6 +171,11 @@ impl<T, const INITIAL_CAPACITY: usize> Clone for DoublingGrowthStrategy<T, INITI
 
 impl<T, const INITIAL_CAPACITY: usize> Sealed for DoublingGrowthStrategy<T, INITIAL_CAPACITY> {}
 
+/// Adds a fixed amount of capacity whenever the list runs out of memory.
+///
+/// The const-generic parameter may be used to specify how many elements reside in each block that is allocated.
+/// If set to `0` (the default), a reasonable value is determined based on the size of the element.
+/// Initial capacities that are a power of two are recommended for performance reasons.
 pub struct FlatGrowthStrategy<T, const BLOCK_CAPACITY: usize = 0> {
     _marker: PhantomData<fn() -> T>,
 }
@@ -171,9 +193,10 @@ impl<T> Default for FlatGrowthStrategy<T> {
 }
 
 impl<T, const BLOCK_CAPACITY: usize> FlatGrowthStrategy<T, BLOCK_CAPACITY> {
+    /// Constructs a new `FlatGrowthStrategy`.
     pub fn new() -> Self {
         Self {
-            _marker: PhantomData
+            _marker: PhantomData,
         }
     }
 

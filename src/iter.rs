@@ -9,7 +9,7 @@ use allocator_api2::alloc::{Allocator, Global};
 use crate::util::{assume_assert, impl_iter};
 use crate::{Block, DefaultGrowthStrategy, GrowthStrategy, StableList};
 
-pub struct RawChunksIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+pub(super) struct RawChunksIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     strategy: S,
     blocks: &'a [*mut Block],
     indices: Range<usize>,
@@ -73,6 +73,7 @@ impl_iter! {
     force_send = true;
 }
 
+/// Returned by [`StableList::chunks_iter`].
 pub struct ChunksIter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a (T, S)>,
@@ -107,6 +108,7 @@ impl_iter! {
     force_send = false;
 }
 
+/// Returned by [`StableList::chunks_iter_mut`].
 pub struct ChunksIterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a mut (T, S)>,
@@ -138,7 +140,7 @@ impl_iter! {
     force_send = false;
 }
 
-pub struct RawIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
+pub(super) struct RawIter<'a, T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     chunks: RawChunksIter<'a, T, S>,
     len: usize,
     front: Range<NonNull<T>>,
@@ -164,6 +166,10 @@ impl<'a, T, S: GrowthStrategy<T>> Iterator for RawIter<'a, T, S> {
     fn next(&mut self) -> Option<NonNull<T>> {
         #[allow(clippy::iter_nth_zero)]
         self.nth(0)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
     }
 
     fn nth(&mut self, n: usize) -> Option<NonNull<T>> {
@@ -214,10 +220,6 @@ impl<'a, T, S: GrowthStrategy<T>> Iterator for RawIter<'a, T, S> {
                 }
             }
         }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len, Some(self.len))
     }
 }
 
@@ -298,6 +300,7 @@ unsafe impl<'a, T, S: GrowthStrategy<T>> Sync for RawIter<'a, T, S> {}
 
 unsafe impl<'a, T, S: GrowthStrategy<T>> Send for RawIter<'a, T, S> {}
 
+/// Returned by [`StableList::iter`].
 pub struct Iter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawIter<'a, T, S>,
     _marker: PhantomData<&'a T>,
@@ -332,6 +335,7 @@ impl<'a, T, S: GrowthStrategy<T>> Iter<'a, T, S> {
     }
 }
 
+/// Returned by [`StableList::iter_mut`].
 pub struct IterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawIter<'a, T, S>,
     _marker: PhantomData<&'a mut (T, S)>,
@@ -363,6 +367,7 @@ impl_iter! {
     force_send = false;
 }
 
+/// Returned by [`StableList::into_iter`].
 pub struct IntoIter<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>, A: Allocator = Global> {
     alloc: A,
     raw: RawIter<'static, T, S>,
