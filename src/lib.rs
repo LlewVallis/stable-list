@@ -13,9 +13,10 @@ use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 use core::ops::{Index, IndexMut};
 use core::ptr::NonNull;
-use core::{fmt, ptr};
+use core::{fmt, mem, ptr, slice};
 
 use allocator_api2::alloc::{AllocError, Allocator, Global};
+use allocator_api2::vec::Vec;
 
 pub use growth_strategy::*;
 pub use iter::{ChunksIter, ChunksIterMut, IntoIter, Iter, IterMut};
@@ -27,8 +28,6 @@ mod growth_strategy;
 mod iter;
 mod util;
 
-const ZST_BLOCK_TABLE: &[*mut Block] = &[NonNull::dangling().as_ptr()];
-
 /// The default strategy used by a `StableList`.
 ///
 /// See [`DoublingGrowthStrategy`].
@@ -36,17 +35,26 @@ pub type DefaultGrowthStrategy<T> = DoublingGrowthStrategy<T>;
 
 #[doc = include_str!("doc.md")]
 pub struct StableList<T, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>, A: Allocator = Global> {
+    /// The growth strategy.
     strategy: S,
+    /// The allocator.
     alloc: A,
+    /// Total number of elements.
     len: usize,
-    capacity: usize,
+    /// The number of used blocks, at or before the current block.
+    /// All blocks before the current must be full, all after must be empty.
     used_blocks: usize,
-    block_table: NonNull<[*mut Block]>,
+    /// One past the end of the last element in the current block.
     next_free: NonNull<T>,
+    /// The cumulative capacity of all used blocks.
+    used_blocks_capacity: usize,
+    /// The raw parts of the blocks vector.
+    /// If `T` is a ZST, this won't actually be a valid vector.
+    ///
+    /// The `*const *const [T]` would be a `*mut *mut [T]` if not for variance issues.
+    blocks_raw_parts: (NonNull<*const [T]>, usize, usize),
     _marker: PhantomData<T>,
 }
-
-struct Block;
 
 impl<T> Default for StableList<T> {
     fn default() -> Self {
@@ -83,14 +91,23 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// let new_list = StableList::<u32, _, _>::new_with(FlatGrowthStrategy::default(), Global);
     /// ```
     pub fn new_with(strategy: S, alloc: A) -> Self {
+        let blocks_raw_parts = if is_zst::<T>() {
+            (NonNull::dangling(), 0, 0)
+        } else {
+            let blocks = Vec::new_in(alloc.by_ref());
+            let (ptr, len, cap) = blocks.into_raw_parts();
+            let ptr = NonNull::new(ptr).unwrap();
+            (ptr, len, cap)
+        };
+
         Self {
             alloc,
             strategy,
             len: 0,
-            capacity: 0,
+            used_blocks_capacity: 0,
             used_blocks: 0,
             next_free: NonNull::dangling(),
-            block_table: NonNull::from(&[]),
+            blocks_raw_parts,
             _marker: PhantomData,
         }
     }
@@ -173,6 +190,13 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         unsafe { self.get_ptr(index).map(|ptr| &mut *ptr) }
     }
 
+    fn blocks(&self) -> &[*mut [T]] {
+        unsafe {
+            let (ptr, len, _) = self.blocks_raw_parts;
+            slice::from_raw_parts(ptr.as_ptr() as *mut *mut [T], len)
+        }
+    }
+
     fn get_ptr(&self, index: usize) -> Option<*mut T> {
         if index >= self.len {
             return None;
@@ -184,8 +208,9 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
         unsafe {
             let (block_index, sub_index) = self.strategy.translate_index(index);
-            assume_assert!(block_index < self.block_table.len());
-            let block = *self.block_table.as_ref().get_unchecked(block_index);
+            let blocks = self.blocks();
+            assume_assert!(block_index < blocks.len());
+            let block = *blocks.get_unchecked(block_index);
             Some((block as *mut T).add(sub_index))
         }
     }
@@ -260,7 +285,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
     fn try_push_internal(&mut self, value: T) -> Result<(), (AllocError, Layout)> {
         unsafe {
-            if self.len == self.capacity {
+            if self.len == self.used_blocks_capacity {
                 self.try_add_block()?;
             }
 
@@ -322,7 +347,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         let Some(mut next) = iter.next() else { return Ok(()) };
 
         loop {
-            while self.len < self.capacity {
+            while self.len < self.used_blocks_capacity {
                 unsafe {
                     self.push_fast_path(next);
                 }
@@ -340,7 +365,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     }
 
     unsafe fn push_fast_path(&mut self, value: T) {
-        assume_assert!(self.len < self.capacity);
+        assume_assert!(self.len < self.used_blocks_capacity);
 
         self.len += 1;
         ptr::write(self.next_free.as_ptr(), value);
@@ -395,17 +420,19 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         self.used_blocks -= 1;
 
         if self.used_blocks == 0 {
-            self.capacity = 0;
+            self.used_blocks_capacity = 0;
         } else {
-            let block_index = self.used_blocks - 1;
-            let block_ptr = *self.block_table.as_ref().get_unchecked(block_index);
-            let block_capacity = self.strategy.block_capacity(block_index);
+            let new_last_block = *self.blocks().get_unchecked(self.used_blocks - 1);
+            let old_last_block = *self.blocks().get_unchecked(self.used_blocks);
 
-            self.capacity = self.strategy.cumulative_capacity(self.used_blocks);
-            self.next_free = NonNull::new_unchecked((block_ptr as *mut T).add(block_capacity));
+            self.used_blocks_capacity -= (*old_last_block).len();
+
+            let last_block_start = new_last_block as *mut T;
+            let last_block_len = (*new_last_block).len();
+            self.next_free = NonNull::new_unchecked(last_block_start.add(last_block_len));
         }
 
-        assume_assert!(self.len == self.capacity);
+        assume_assert!(self.len == self.used_blocks_capacity);
     }
 
     /// Inserts an element at a specific index, shifting elements after it to the right.
@@ -483,7 +510,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
 
         unsafe {
-            if self.len == self.capacity {
+            if self.len == self.used_blocks_capacity {
                 self.try_add_block()?;
             }
 
@@ -548,13 +575,13 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
     #[inline(never)]
     unsafe fn try_add_block(&mut self) -> Result<(), (AllocError, Layout)> {
-        assume_assert!(self.len == self.capacity);
+        assume_assert!(self.len == self.used_blocks_capacity);
 
-        if self.used_blocks < self.block_table.len() {
-            let next_block = self.block_table.as_ref()[self.used_blocks];
-
+        if self.used_blocks < self.blocks().len() {
+            let next_block = *self.blocks().get_unchecked(self.used_blocks);
             self.used_blocks += 1;
-            self.capacity = self.strategy.block_capacity(self.used_blocks);
+
+            self.used_blocks_capacity += (*next_block).len();
             self.next_free = NonNull::new_unchecked(next_block as *mut T);
 
             return Ok(());
@@ -572,70 +599,67 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     }
 
     unsafe fn allocate_zst(&mut self) -> Result<(), (AllocError, Layout)> {
+        const ZST_BLOCKS: &*const [()] = &(&[()] as *const _);
+
         // Only one block should ever be constructed
-        assume_assert!(self.capacity == 0);
+        assume_assert!(self.used_blocks_capacity == 0);
         assume_assert!(self.used_blocks == 0);
 
-        self.capacity = usize::MAX;
-        self.block_table = NonNull::from(ZST_BLOCK_TABLE);
+        self.used_blocks_capacity = usize::MAX;
         self.used_blocks = 1;
+
+        let blocks_ptr = NonNull::from(ZST_BLOCKS).cast::<*const [T]>();
+        self.blocks_raw_parts = (blocks_ptr, 1, 0);
 
         Ok(())
     }
 
     unsafe fn allocate_non_zst(&mut self) -> Result<(), (AllocError, Layout)> {
-        let block_index = self.block_table.len();
+        let block_index = self.blocks().len();
         assume_assert!(self.used_blocks == block_index);
 
-        let (layout, block_table_offset) =
-            Self::layout_block(&self.strategy, block_index).unwrap_assume();
+        let capacity = self.strategy.block_capacity(block_index);
+        let layout = Self::layout_block(capacity).unwrap_assume();
 
         let allocation = match self.alloc.allocate(layout) {
             Ok(allocation) => allocation.as_ptr() as *mut u8,
             Err(err) => return Err((err, layout)),
         };
 
-        let block = allocation as *mut Block;
+        let block = ptr::slice_from_raw_parts_mut(allocation as *mut T, capacity);
+        self.add_to_block_table(block);
 
-        unsafe {
-            let block_table_base = allocation.add(block_table_offset) as *mut *mut Block;
-            let block_table = ptr::slice_from_raw_parts_mut(block_table_base, block_index + 1);
-            self.move_block_table(block_table, block);
-        }
-
-        self.next_free = NonNull::new_unchecked(allocation as *mut T);
+        self.next_free = NonNull::new_unchecked(block as *mut T);
         self.used_blocks = block_index + 1;
-        self.capacity = self.strategy.cumulative_capacity(self.used_blocks);
+        self.used_blocks_capacity += capacity;
 
         Ok(())
     }
 
-    unsafe fn layout_block(
-        strategy: &S,
-        block_index: usize,
-    ) -> Result<(Layout, usize), LayoutError> {
-        Self::layout_block_with_capacity(strategy.block_capacity(block_index), block_index)
-    }
-
-    fn layout_block_with_capacity(
-        capacity: usize,
-        block_index: usize,
-    ) -> Result<(Layout, usize), LayoutError> {
+    fn add_to_block_table(&mut self, value: *mut [T]) {
         assert!(!is_zst::<T>());
 
-        let elements_layout = Layout::array::<T>(capacity)?;
-        let block_table_layout = Layout::array::<*mut Block>(block_index + 1)?;
-        let (layout, block_table_offset) = elements_layout.extend(block_table_layout)?;
-        Ok((layout, block_table_offset))
+        unsafe {
+            let (ptr, len, cap) = self.blocks_raw_parts;
+            let mut blocks = Vec::from_raw_parts_in(ptr.as_ptr(), len, cap, &self.alloc);
+
+            blocks.push(value);
+
+            let (new_ptr, new_len, new_cap) = blocks.into_raw_parts();
+            let new_ptr = NonNull::new_unchecked(new_ptr);
+            self.blocks_raw_parts = (new_ptr, new_len, new_cap)
+        }
     }
 
-    unsafe fn move_block_table(&mut self, new_table: *mut [*mut Block], new_block: *mut Block) {
-        let src = self.block_table.as_ref().as_ptr();
-        let dest = new_table as *mut *mut Block;
-        ptr::copy_nonoverlapping(src, dest, self.block_table.len());
-        ptr::write(dest.add(self.block_table.len()), new_block);
+    const fn layout_block(capacity: usize) -> Result<Layout, LayoutError> {
+        assert!(!is_zst::<T>());
 
-        self.block_table = NonNull::new_unchecked(new_table);
+        let Some(size) = capacity.checked_mul(mem::size_of::<T>()) else {
+            // Always Err(LayoutError)
+            return Layout::from_size_align(0, 0);
+        };
+
+        Layout::from_size_align(size, mem::align_of::<T>())
     }
 
     /// Returns an iterator over contiguous ranges of elements from the list.
@@ -672,15 +696,18 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// assert!(Iterator::eq(list.chunks(), expected));
     /// ```
     ///
-    /// Flat growth:
+    /// Flat growth with an incomplete last chunk:
     ///
     /// ```
     /// # use allocator_api2::alloc::Global;
     /// # use collections::{FlatGrowthStrategy, StableList};
     /// let mut list = StableList::new_with(FlatGrowthStrategy::<_, 4>::new(), Global);
-    /// list.extend(0..16);
+    /// list.extend(0..13);
     ///
-    /// let expected = [&[0, 1, 2, 3], &[4, 5, 6, 7], &[8, 9, 10, 11], &[12, 13, 14, 15]];
+    /// let expected: [&[i32]; 4] =
+    ///     [&[0, 1, 2, 3], &[4, 5, 6, 7],
+    ///     &[8, 9, 10, 11], &[12]
+    /// ];
     ///
     /// assert!(Iterator::eq(list.chunks(), expected));
     /// ```
@@ -720,16 +747,18 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         IterMut::new(self)
     }
 
-    unsafe fn free_blocks(strategy: &S, alloc: &A, block_table: NonNull<[*mut Block]>) {
-        let blocks_base = block_table.as_ref() as *const _ as *mut *mut Block;
-        let blocks_len = block_table.as_ref().len();
+    unsafe fn free_blocks(alloc: &A, blocks_ptr: *mut *mut [T], blocks_len: usize, blocks_cap: usize) {
+        if !is_zst::<T>() {
+            let blocks = Vec::from_raw_parts_in(blocks_ptr, blocks_len, blocks_cap, alloc);
 
-        for block_index in 0..blocks_len {
-            if !is_zst::<T>() {
-                let (layout, _) = Self::layout_block(strategy, block_index).unwrap_assume();
-                let ptr = NonNull::new_unchecked(*blocks_base.add(block_index) as *mut u8);
+            for block in blocks.iter().copied() {
+                let ptr = NonNull::new_unchecked(block).cast::<u8>();
+                let capacity = (*block).len();
+                let layout = Self::layout_block(capacity).unwrap_assume();
                 alloc.deallocate(ptr, layout);
             }
+
+            drop(blocks);
         }
     }
 }
@@ -738,10 +767,12 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> Drop for StableList<T, S, A> {
     fn drop(&mut self) {
         unsafe {
             for chunk in self.chunks_mut() {
-                ptr::drop_in_place(chunk as *mut [T]);
+                ptr::drop_in_place(chunk);
             }
 
-            Self::free_blocks(&self.strategy, &self.alloc, self.block_table);
+            let (blocks_ptr, blocks_len, blocks_cap) = self.blocks_raw_parts;
+            let blocks_ptr = blocks_ptr.as_ptr() as *mut *mut [T];
+            Self::free_blocks(&self.alloc, blocks_ptr, blocks_len, blocks_cap);
         }
     }
 }
@@ -1206,6 +1237,9 @@ mod test {
 
     #[test]
     fn pop_and_readd() {
+        #[cfg(miri)]
+        const N: &[usize] = &[0, 1, 2, 5, 10];
+
         for start_count in N {
             for pop_count in N {
                 for readd_count in N {
@@ -1223,11 +1257,14 @@ mod test {
 
     #[test]
     fn pop_and_readd_front() {
-        const SMALL_N: &[usize] = &[0, 1, 2, 5, 10, 100];
+        #[cfg(not(miri))]
+        const N: &[usize] = &[0, 1, 2, 5, 10, 100];
+        #[cfg(miri)]
+        const N: &[usize] = &[0, 1, 2, 5, 10];
 
-        for start_count in SMALL_N {
-            for pop_count in SMALL_N {
-                for readd_count in SMALL_N {
+        for start_count in N {
+            for pop_count in N {
+                for readd_count in N {
                     if pop_count > start_count {
                         continue;
                     }
@@ -1274,6 +1311,9 @@ mod test {
 
     #[test]
     fn prepend_many() {
+        #[cfg(miri)]
+        const N: &[usize] = &[0, 1, 2, 5, 10, 100];
+
         for n in N {
             let mut model = Model::default();
             (0..*n).for_each(|i| model.insert(0, i));
@@ -1283,6 +1323,9 @@ mod test {
 
     #[test]
     fn prepend_many_zst() {
+        #[cfg(miri)]
+        const N: &[usize] = &[0, 1, 2, 5, 10, 100];
+
         for n in N {
             let mut model = Model::default();
             (0..*n).for_each(|_| model.insert(0, ()));
@@ -1460,6 +1503,9 @@ mod test {
 
     #[test]
     fn into_iter_doesnt_drop_iterated() {
+        #[cfg(miri)]
+        const N: &[usize] = &[1, 2, 5, 10, 100];
+
         for a in N {
             for b in N {
                 let strong = Arc::new(());

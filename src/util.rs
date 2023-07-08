@@ -126,6 +126,6 @@ impl<T, E> UnwrapExt<T> for Result<T, E> {
     }
 }
 
-pub fn is_zst<T>() -> bool {
+pub const fn is_zst<T>() -> bool {
     mem::size_of::<T>() == 0
 }

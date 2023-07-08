@@ -52,6 +52,10 @@ impl<T> Default for DoublingGrowthStrategy<T> {
 }
 
 impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACITY> {
+    const MAX_BLOCKS: usize = Self::compute_max_blocks();
+    const FIRST_BLOCK_CAPACITY: usize = Self::compute_first_block_capacity();
+    const FIRST_BLOCK_BITS: u32 = Self::compute_first_block_bits();
+
     /// Construct a new `DoublingGrowthStrategy`.
     ///
     /// # Panics
@@ -68,11 +72,15 @@ impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACIT
         }
     }
 
-    fn first_block_capacity(&self) -> usize {
-        2usize.pow(Self::first_block_bits(self))
+    const fn compute_first_block_capacity() -> usize {
+        if is_zst::<T>() {
+            usize::MAX
+        } else {
+            2usize.pow(Self::FIRST_BLOCK_BITS)
+        }
     }
 
-    fn first_block_bits(&self) -> u32 {
+    const fn compute_first_block_bits() -> u32 {
         if is_zst::<T>() {
             return usize::BITS;
         }
@@ -99,27 +107,31 @@ impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACIT
             INITIAL_CAPACITY.ilog2()
         }
     }
+
+    const fn compute_max_blocks() -> usize {
+        if is_zst::<T>() {
+            return 1;
+        }
+
+        let mut count = 0usize;
+        let mut capacity = Self::FIRST_BLOCK_CAPACITY;
+
+        loop {
+            if StableList::<T>::layout_block(capacity).is_ok() {
+                count += 1;
+                capacity *= 2;
+            } else {
+                return count;
+            }
+        }
+    }
 }
 
 impl<T, const INITIAL_CAPACITY: usize> GrowthStrategy<T>
     for DoublingGrowthStrategy<T, INITIAL_CAPACITY>
 {
     fn max_blocks(&self) -> usize {
-        if is_zst::<T>() {
-            return 1;
-        }
-
-        let mut count = 0usize;
-
-        loop {
-            let capacity = self.first_block_capacity() * 2usize.pow(count.saturating_sub(1) as u32);
-
-            if StableList::<T>::layout_block_with_capacity(capacity, count).is_ok() {
-                count += 1;
-            } else {
-                return count;
-            }
-        }
+        Self::MAX_BLOCKS
     }
 
     unsafe fn block_capacity(&self, index: usize) -> usize {
@@ -129,7 +141,7 @@ impl<T, const INITIAL_CAPACITY: usize> GrowthStrategy<T>
             return usize::MAX;
         }
 
-        self.first_block_capacity() * 2usize.pow(index.saturating_sub(1) as u32)
+        Self::FIRST_BLOCK_CAPACITY * 2usize.pow(index.saturating_sub(1) as u32)
     }
 
     unsafe fn cumulative_capacity(&self, blocks: usize) -> usize {
@@ -139,7 +151,7 @@ impl<T, const INITIAL_CAPACITY: usize> GrowthStrategy<T>
             return if blocks == 0 { 0 } else { usize::MAX };
         }
 
-        self.first_block_capacity() * (1usize << blocks >> 1)
+        Self::FIRST_BLOCK_CAPACITY * (1usize << blocks >> 1)
     }
 
     unsafe fn is_threshold_point(&self, len: usize) -> bool {
@@ -147,15 +159,15 @@ impl<T, const INITIAL_CAPACITY: usize> GrowthStrategy<T>
             return len == 0;
         }
 
-        let big_enough = len & ((1 << self.first_block_bits()) - 1) == 0;
+        let big_enough = len & ((1 << Self::FIRST_BLOCK_BITS) - 1) == 0;
         let is_pow_2 = len & len.wrapping_sub(1) == 0;
         is_pow_2 && big_enough
     }
 
     unsafe fn translate_index(&self, index: usize) -> (usize, usize) {
         let bits = usize::BITS - index.leading_zeros();
-        let block_index = bits.saturating_sub(self.first_block_bits()) as usize;
-        let mask = (self.first_block_capacity() * (1usize << block_index >> 1)).wrapping_sub(1);
+        let block_index = bits.saturating_sub(Self::FIRST_BLOCK_BITS) as usize;
+        let mask = (Self::FIRST_BLOCK_CAPACITY * (1usize << block_index >> 1)).wrapping_sub(1);
         let sub_index = index & mask;
         (block_index, sub_index)
     }
@@ -193,6 +205,9 @@ impl<T> Default for FlatGrowthStrategy<T> {
 }
 
 impl<T, const BLOCK_CAPACITY: usize> FlatGrowthStrategy<T, BLOCK_CAPACITY> {
+    const CAPACITY: usize = Self::compute_actual_block_capacity();
+    const MAX_BLOCKS: usize = Self::compute_max_blocks();
+
     /// Constructs a new `FlatGrowthStrategy`.
     pub fn new() -> Self {
         Self {
@@ -200,7 +215,7 @@ impl<T, const BLOCK_CAPACITY: usize> FlatGrowthStrategy<T, BLOCK_CAPACITY> {
         }
     }
 
-    fn block_capacity(&self) -> usize {
+    const fn compute_actual_block_capacity() -> usize {
         if is_zst::<T>() {
             return usize::MAX;
         }
@@ -211,46 +226,42 @@ impl<T, const BLOCK_CAPACITY: usize> FlatGrowthStrategy<T, BLOCK_CAPACITY> {
             BLOCK_CAPACITY
         }
     }
-}
 
-impl<T, const BLOCK_CAPACITY: usize> GrowthStrategy<T> for FlatGrowthStrategy<T, BLOCK_CAPACITY> {
-    fn max_blocks(&self) -> usize {
+    const fn compute_max_blocks() -> usize {
         if is_zst::<T>() {
             return 1;
         }
 
-        let mut search_space = 0..(usize::MAX / self.block_capacity());
-
-        while search_space.len() > 1 {
-            let mid = search_space.start + (search_space.len() / 2);
-
-            if StableList::<T>::layout_block_with_capacity(self.block_capacity(), mid).is_ok() {
-                search_space = mid..search_space.end;
-            } else {
-                search_space = search_space.start..mid;
-            }
+        if StableList::<T>::layout_block(Self::CAPACITY).is_ok() {
+            usize::MAX / Self::CAPACITY
+        } else {
+            0
         }
+    }
+}
 
-        search_space.start
+impl<T, const BLOCK_CAPACITY: usize> GrowthStrategy<T> for FlatGrowthStrategy<T, BLOCK_CAPACITY> {
+    fn max_blocks(&self) -> usize {
+        Self::MAX_BLOCKS
     }
 
     unsafe fn block_capacity(&self, index: usize) -> usize {
         assume_assert!(index < self.max_blocks());
-        self.block_capacity()
+        Self::CAPACITY
     }
 
     unsafe fn cumulative_capacity(&self, blocks: usize) -> usize {
         assume_assert!(blocks <= self.max_blocks());
-        self.block_capacity() * blocks
+        Self::CAPACITY * blocks
     }
 
     unsafe fn is_threshold_point(&self, len: usize) -> bool {
-        len % self.block_capacity() == 0
+        len % Self::CAPACITY == 0
     }
 
     unsafe fn translate_index(&self, index: usize) -> (usize, usize) {
         assume_assert!(index < self.max_blocks());
-        (index / self.block_capacity(), index % self.block_capacity())
+        (index / Self::CAPACITY, index % Self::CAPACITY)
     }
 }
 
