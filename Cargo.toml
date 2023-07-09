@@ -9,6 +9,8 @@ default-features = false
 features = ["alloc"]
 
 [features]
+default = ["std"]
+std = []
 nightly = ["allocator-api2/nightly"]
 
 [dev-dependencies]

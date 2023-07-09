@@ -24,6 +24,13 @@ pub trait GrowthStrategy<T>: Clone + Sealed {
     unsafe fn cumulative_capacity(&self, blocks: usize) -> usize;
 
     #[doc(hidden)]
+    fn max_capacity(&self) -> usize {
+        unsafe {
+            self.cumulative_capacity(self.max_blocks())
+        }
+    }
+
+    #[doc(hidden)]
     unsafe fn is_threshold_point(&self, len: usize) -> bool;
 
     #[doc(hidden)]
