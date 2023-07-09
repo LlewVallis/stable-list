@@ -1,13 +1,13 @@
-use core::{mem, ptr};
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ops::Range;
 use core::ptr::NonNull;
+use core::{mem, ptr};
 
 use allocator_api2::alloc::{Allocator, Global};
 
-use crate::{DefaultGrowthStrategy, GrowthStrategy, StableList};
 use crate::util::{assume_assert, impl_iter};
+use crate::{DefaultGrowthStrategy, GrowthStrategy, StableList};
 
 pub(super) struct RawChunksIter<'a, T, S: GrowthStrategy<T>> {
     blocks_ptr: NonNull<*const [T]>,
@@ -406,7 +406,12 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> Drop for IntoIter<T, S, A> {
             }
 
             let blocks_ptr = self.raw.chunks.blocks_ptr.as_ptr() as *mut *mut [T];
-            StableList::<T, S, A>::free_blocks(&self.alloc, blocks_ptr, self.blocks_len, self.blocks_cap);
+            StableList::<T, S, A>::free_blocks(
+                &self.alloc,
+                blocks_ptr,
+                self.blocks_len,
+                self.blocks_cap,
+            );
         }
     }
 }

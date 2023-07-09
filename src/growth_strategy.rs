@@ -12,6 +12,9 @@ use crate::StableList;
 /// Custom implementations of this trait are not supported, and the methods of the trait should not be called directly.
 /// Specifically, the methods of this trait are considered an implementation detail and may be changed at will.
 ///
+/// The chunks returned by [`chunks`](StableList::chunks) and [`chunks_mut`](StableList::chunks_mut) follow the growth strategy.
+/// Note that for ZSTs, all growth strategies have exactly one block with `usize::MAX` elements.
+///
 /// See [`DoublingGrowthStrategy`] and [`FlatGrowthStrategy`].
 pub trait GrowthStrategy<T>: Clone + Sealed {
     #[doc(hidden)]
@@ -25,9 +28,7 @@ pub trait GrowthStrategy<T>: Clone + Sealed {
 
     #[doc(hidden)]
     fn max_capacity(&self) -> usize {
-        unsafe {
-            self.cumulative_capacity(self.max_blocks())
-        }
+        unsafe { self.cumulative_capacity(self.max_blocks()) }
     }
 
     #[doc(hidden)]
@@ -121,23 +122,23 @@ impl<T, const INITIAL_CAPACITY: usize> DoublingGrowthStrategy<T, INITIAL_CAPACIT
         }
 
         let mut count = 0usize;
-        let mut capacity = Self::FIRST_BLOCK_CAPACITY;
+        let mut next_capacity = Self::FIRST_BLOCK_CAPACITY;
 
         loop {
             if count == usize::BITS as usize {
                 return count;
             }
 
-            if capacity.checked_mul(2).is_none() {
+            if StableList::<T>::layout_block(next_capacity).is_err() {
                 return count;
             }
 
-            if StableList::<T>::layout_block(capacity).is_err() {
-                return count;
-            }
-
-            capacity *= 2;
             count += 1;
+
+            next_capacity = match next_capacity.checked_mul(2) {
+                Some(n) => n,
+                None => return count,
+            }
         }
     }
 }

@@ -310,6 +310,8 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
     /// Increases the capacity of the list, panicking if that operation fails.
     ///
+    /// Using [`Vec::reserve`] is useful for performance reasons, but much less so for [`StableList::reserve`].
+    /// For this reason you probably don't need this method.
     /// See [`try_reserve`](StableList::try_reserve) for more information.
     ///
     /// # Examples
@@ -344,8 +346,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// assert_eq!(list[1], 2);
     /// ```
     pub fn push(&mut self, value: T) {
-        self.try_push(value)
-            .unwrap_or_else(TryReserveError::panic)
+        self.try_push(value).unwrap_or_else(TryReserveError::panic)
     }
 
     /// Adds an element to the end of the list, handling memory allocation failure gracefully.
@@ -386,7 +387,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
                 self.try_prepare_push()?;
             }
 
-            self.push_with_used_capacity(value);
+            self.push_into_current_block(value);
         }
 
         Ok(())
@@ -395,7 +396,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// Like [`extend`](StableList::extend), but with graceful handling of allocation failure.
     ///
     /// This method is to [`extend`](StableList::extend) as [`try_push`](StableList::try_push) is to [`push`](StableList::push).
-    /// If the method fails, the iterator and list are left in valid but unspecified states.
+    /// If the method fails, all items consumed from the iterator will appear in the list, although how many is unspecified.
     ///
     /// # Examples
     ///
@@ -427,7 +428,10 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAllocator);
     /// assert!(list.try_extend(0..100).is_err());
     /// ```
-    pub fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), TryReserveError> {
+    pub fn try_extend<I: IntoIterator<Item = T>>(
+        &mut self,
+        iter: I,
+    ) -> Result<(), TryReserveError> {
         let mut iter = iter.into_iter();
 
         let Some(mut next) = iter.next() else { return Ok(()) };
@@ -435,7 +439,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         loop {
             while self.len < self.used_blocks_capacity {
                 unsafe {
-                    self.push_with_used_capacity(next);
+                    self.push_into_current_block(next);
                 }
 
                 next = match iter.next() {
@@ -450,7 +454,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
     }
 
-    unsafe fn push_with_used_capacity(&mut self, value: T) {
+    unsafe fn push_into_current_block(&mut self, value: T) {
         assume_assert!(self.len < self.used_blocks_capacity);
 
         self.len += 1;
@@ -503,7 +507,10 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     }
 
     unsafe fn allocate_zst(&mut self) -> Result<NonNull<[T]>, TryReserveError> {
-        const ZST_BLOCKS: &[*const [()]] = &[ptr::slice_from_raw_parts(NonNull::dangling().as_ptr() as *const (), usize::MAX)];
+        const ZST_BLOCKS: &[*const [()]] = &[ptr::slice_from_raw_parts(
+            NonNull::dangling().as_ptr() as *const (),
+            usize::MAX,
+        )];
 
         // Only one block should ever be constructed
         assume_assert!(self.used_blocks_capacity == 0);
@@ -557,7 +564,9 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
         let Some(size) = capacity.checked_mul(mem::size_of::<T>()) else {
             // Always Err(LayoutError)
-            return Layout::from_size_align(0, 0);
+            let err =  Layout::from_size_align(0, 0);
+            assert!(err.is_err());
+            return err;
         };
 
         Layout::from_size_align(size, mem::align_of::<T>())
@@ -649,7 +658,8 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// assert_eq!(list, StableList::from_iter([10, 20, 30]));
     /// ```
     pub fn insert(&mut self, index: usize, value: T) {
-        self.try_insert(index, value).unwrap_or_else(TryReserveError::panic)
+        self.try_insert(index, value)
+            .unwrap_or_else(TryReserveError::panic)
     }
 
     /// Like [`insert`](StableList::insert), but with graceful handling of allocation failure.
@@ -773,6 +783,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     ///
     /// So, each element appears in exactly one chunk, and order is preserved in and between chunks.
     /// The chunks returned by this method are the same as the blocks produced by the growth strategy.
+    /// For example, all chunks will have the same size if a flat strategy is used, and there can never be an empty chunk.
     ///
     /// # Examples
     ///
@@ -843,7 +854,12 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         IterMut::new(self)
     }
 
-    unsafe fn free_blocks(alloc: &A, blocks_ptr: *mut *mut [T], blocks_len: usize, blocks_cap: usize) {
+    unsafe fn free_blocks(
+        alloc: &A,
+        blocks_ptr: *mut *mut [T],
+        blocks_len: usize,
+        blocks_cap: usize,
+    ) {
         if !is_zst::<T>() {
             let blocks = Vec::from_raw_parts_in(blocks_ptr, blocks_len, blocks_cap, alloc);
 
@@ -1030,13 +1046,14 @@ unsafe impl<T: Sync, S: GrowthStrategy<T> + Sync, A: Allocator + Sync> Sync
 {
 }
 
+/// An error returned by
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TryReserveError {
     CapacityOverflow,
     #[non_exhaustive]
     AllocError {
         layout: Layout,
-    }
+    },
 }
 
 impl TryReserveError {
@@ -1053,12 +1070,8 @@ impl Display for TryReserveError {
         f.write_str("memory allocation failed")?;
 
         let reason = match self {
-            Self::CapacityOverflow => {
-                " because the new capacity would exceed the maximum"
-            }
-            Self::AllocError { .. } => {
-                " because the memory allocator returned an error"
-            }
+            Self::CapacityOverflow => " because the new capacity would exceed the maximum",
+            Self::AllocError { .. } => " because the memory allocator returned an error",
         };
 
         f.write_str(reason)
@@ -1073,13 +1086,13 @@ mod test {
     use alloc::sync::Arc;
     use alloc::vec;
     use alloc::vec::Vec;
-    use allocator_api2::alloc::{Allocator, AllocError, Global};
-    use core::fmt::Debug;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use core::{iter, slice};
+    use allocator_api2::alloc::{AllocError, Allocator, Global};
     use core::alloc::Layout;
     use core::cell::Cell;
+    use core::fmt::Debug;
     use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{iter, slice};
 
     use crate::growth_strategy::FlatGrowthStrategy;
     use crate::{
@@ -1730,7 +1743,8 @@ mod test {
             }
         }
 
-        let mut list = StableList::new_with(DefaultGrowthStrategy::new(), FickleAllocator::default());
+        let mut list =
+            StableList::new_with(DefaultGrowthStrategy::new(), FickleAllocator::default());
 
         list.allocator().works.set(false);
         assert!(list.try_reserve(1000).is_err());
@@ -1741,6 +1755,21 @@ mod test {
 
         list.allocator().works.set(false);
         assert!(list.try_extend(0..1000).is_ok());
+    }
+
+    #[test]
+    #[cfg(miri)]
+    fn provenance_is_element_wise() {
+        let mut list = StableList::from_iter([1, 2]);
+
+        // If the pointers overlapped in provenance, this would be UB as the read outlives the write
+        let read_0 = &list[0] as *const i32;
+        let write_1 = &mut list[1] as *mut i32;
+
+        unsafe {
+            write_1.write(3);
+            read_0.read();
+        }
     }
 
     #[allow(clippy::extra_unused_lifetimes)]

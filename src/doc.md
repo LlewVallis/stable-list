@@ -92,4 +92,6 @@ The default growth strategy is designed to work decently with whatever you throw
 The allocator parameter controls where the list gets its memory from.
 See the [`allocator-api2` crate](https://crates.io/crates/allocator-api2) for more info.
 
+If a `T` is zero-sized, no allocations will ever be made and instead the list is backed by a single zero-sized block with `usize::MAX` capacity.
+
 [^fast]: For some definition of fast
