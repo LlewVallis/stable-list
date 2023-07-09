@@ -433,6 +433,8 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
 
     /// Adds an element to the end of the list, handling memory allocation failure gracefully.
     ///
+    /// If you want the element back on allocation failure, use [`try_extend`](StableList::try_extend) instead.
+    ///
     /// # Examples
     ///
     /// We generally don't expect allocation to fail:
@@ -508,7 +510,10 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// }
     ///
     /// let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAllocator);
-    /// assert!(list.try_extend(0..100).is_err());
+    /// let mut iter = [1, 2, 3].into_iter();
+    ///
+    /// assert!(list.try_extend(&mut iter).is_err());
+    /// assert!(Iterator::eq(iter, [1, 2, 3]));
     /// ```
     pub fn try_extend<I: IntoIterator<Item = T>>(
         &mut self,
@@ -516,22 +521,33 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     ) -> Result<(), TryReserveError> {
         let mut iter = iter.into_iter();
 
-        let Some(mut next) = iter.next() else { return Ok(()) };
+        unsafe {
+            loop {
+                while self.len < self.total_capacity {
+                    let mut next = match iter.next() {
+                        Some(next) => next,
+                        None => return Ok(()),
+                    };
 
-        loop {
-            while self.len < self.used_blocks_capacity {
-                unsafe {
-                    self.push_into_current_block(next);
+                    if self.len == self.used_blocks_capacity {
+                        self.prepare_push_from_allocated();
+                    }
+
+                    loop {
+                        self.push_into_current_block(next);
+
+                        if self.len == self.used_blocks_capacity {
+                            break;
+                        } else {
+                            next = match iter.next() {
+                                Some(next) => next,
+                                None => return Ok(()),
+                            }
+                        }
+                    }
                 }
 
-                next = match iter.next() {
-                    Some(next) => next,
-                    None => return Ok(()),
-                };
-            }
-
-            unsafe {
-                self.try_prepare_push()?;
+                self.allocate()?;
             }
         }
     }
@@ -1845,7 +1861,27 @@ mod test {
     }
 
     #[test]
-    #[cfg(miri)]
+    fn try_extend_doesnt_consume_what_isnt_added() {
+        struct DummyAlloc;
+
+        unsafe impl Allocator for DummyAlloc {
+            fn allocate(&self, _layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+                Err(AllocError)
+            }
+
+            unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {}
+        }
+
+        let mut list = StableList::new_with(DefaultGrowthStrategy::new(), DummyAlloc);
+        let mut iter = [1, 2, 3].into_iter();
+
+        let _ = list.try_extend(&mut iter);
+
+        assert!(Iterator::eq(iter, [1, 2, 3]));
+    }
+
+    // Only miri will catch this
+    #[test]
     fn provenance_is_element_wise() {
         let mut list = StableList::from_iter([1, 2]);
 
