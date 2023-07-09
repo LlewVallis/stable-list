@@ -1,9 +1,10 @@
-A pointer-stable list, like `Vec<Box<T>>` but much more efficient.
+A pointer-stable list that doesn't relocate elements, a bit like `Vec<Box<T>>` but much more efficient.
 
 Specifically `StableList` guarantees that the memory location of `list[index]` is the same for the entire lifetime of `list`, regardless of elements being added or removed.
+Note that insertions and removals that aren't at the end of the list *do* relocate elements.
 Since `StableList` doesn't relocate elements, this also means that the worst case performance of [`push`ing](StableList::push) is only as slow as allocating a new chunk of memory.
 Although `StableList` is fast[^fast], `Vec` is faster and easier to work with (since it dereferences to a slice).
-Use `Vec` unless you need pointer stability.
+Use `Vec` unless you need pointer stability or want multiple buffers for some (good) reason.
 
 # Examples
 
@@ -91,7 +92,6 @@ The default growth strategy is designed to work decently with whatever you throw
 
 The allocator parameter controls where the list gets its memory from.
 See the [`allocator-api2` crate](https://crates.io/crates/allocator-api2) for more info.
-
 If a `T` is zero-sized, no allocations will ever be made and instead the list is backed by a single zero-sized block with `usize::MAX` capacity.
 
 [^fast]: For some definition of fast

@@ -74,7 +74,7 @@ impl_iter! {
     force_send = true;
 }
 
-/// Returned by [`StableList::chunks_iter`].
+/// Returned by [`StableList::chunks`].
 pub struct ChunksIter<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a (T, S)>,
@@ -109,7 +109,7 @@ impl_iter! {
     force_send = false;
 }
 
-/// Returned by [`StableList::chunks_iter_mut`].
+/// Returned by [`StableList::chunks_mut`].
 pub struct ChunksIterMut<'a, T: 'a, S: GrowthStrategy<T> = DefaultGrowthStrategy<T>> {
     raw: RawChunksIter<'a, T, S>,
     _marker: PhantomData<&'a mut (T, S)>,

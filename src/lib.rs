@@ -201,7 +201,88 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
         }
     }
 
-    fn get_ptr(&self, index: usize) -> Option<*mut T> {
+    /// Like [`get`](StableList::get) or [`get_mut`](StableList::get_mut), but returning a raw pointer.
+    ///
+    /// The pointer returned has some important properties:
+    /// 1. You can write to the pointer, as long as you don't break any aliasing rules.
+    ///    This is in contrast to `&list[index] as *const T as *mut T`.
+    /// 2. No borrowing happens, so the pointer has the same provenance as the allocation the element is in.
+    ///
+    /// See [`ptr`] for explanation on what that means.
+    /// If you are building a graph-like data structure with shared mutable pointers, you should probably use this method.
+    ///
+    /// # Examples
+    ///
+    /// You can write to an element with an immutable reference:
+    ///
+    /// ```
+    /// # use std::ptr;
+    /// # use collections::StableList;
+    /// // Could not be written without `get_ptr`
+    /// unsafe fn evil<T>(list: &StableList<T>, index: usize, value: T) {
+    ///     let ptr = list.get_ptr(index).unwrap();
+    ///     *ptr = value;
+    /// }
+    ///
+    /// let list = StableList::from_iter([1]);
+    ///
+    /// unsafe {
+    ///     evil(&list, 0, 2);
+    /// }
+    ///
+    /// assert_eq!(list, StableList::from_iter([2]));
+    /// ```
+    ///
+    /// You can do cursed pointer arithmetic between elements in the same allocation:
+    ///
+    /// ```
+    /// # use allocator_api2::alloc::Global;
+    /// # use collections::{FlatGrowthStrategy, StableList};
+    /// let mut list = StableList::new_with(FlatGrowthStrategy::<_, 2>::new(), Global);
+    /// list.extend([1, 2]);
+    ///
+    /// let one = list.get_ptr(0).unwrap();
+    ///
+    /// unsafe {
+    ///     // This would be UB if `one = &list[0] as *const _`
+    ///     let two = one.add(1);
+    ///     assert_eq!(*two, 2);
+    /// }
+    /// ```
+    ///
+    /// You can overlap mutable access to the same variable:
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let list = StableList::from_iter([1]);
+    ///
+    /// let first = list.get_ptr(0).unwrap();
+    /// let second = list.get_ptr(0).unwrap();
+    ///
+    /// // Would also be UB if we instead cast references to raw pointers
+    /// unsafe {
+    ///     *first = 2;
+    ///     *second = 3;
+    ///     assert_eq!(*first, 3);
+    /// }
+    /// ```
+    ///
+    /// You still need to be careful of invalidating pointers:
+    ///
+    /// ```
+    /// # use collections::StableList;
+    /// let list = StableList::from_iter([1]);
+    ///
+    /// let reference = &list[0] as *const _;
+    /// let ptr = list.get_ptr(0).unwrap();
+    ///
+    /// unsafe {
+    ///     *ptr = 2;
+    ///     // This would be UB
+    ///     // let _ = *reference;
+    /// }
+    /// ```
+    pub fn get_ptr(&self, index: usize) -> Option<*mut T> {
         if index >= self.len {
             return None;
         }
@@ -333,6 +414,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     /// # Panics
     ///
     /// If the allocator fails to allocate memory required for the new element or if the maximum number of elements would be exceeded.
+    /// Use [`try_push`](StableList::try_push) for a method that doesn't panic.
     ///
     /// # Examples
     ///
@@ -642,7 +724,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> StableList<T, S, A> {
     ///
     /// # Panics
     ///
-    /// See [`push`](StableList::push#Panics).
+    /// See [`push`](StableList::push).
     /// Also, the index must be lesser or equal to the length of the list.
     ///
     /// # Examples
@@ -894,7 +976,7 @@ impl<T, S: GrowthStrategy<T>, A: Allocator> Extend<T> for StableList<T, S, A> {
     ///
     /// # Panics
     ///
-    /// See [`push`](StableList::push#Panics).
+    /// See [`push`](StableList::push).
     ///
     /// # Examples
     ///
@@ -914,7 +996,7 @@ impl<T> FromIterator<T> for StableList<T> {
     ///
     /// # Panics
     ///
-    /// See [`push`](StableList::push#Panics).
+    /// See [`push`](StableList::push).
     ///
     /// # Examples
     ///
@@ -1046,12 +1128,17 @@ unsafe impl<T: Sync, S: GrowthStrategy<T> + Sync, A: Allocator + Sync> Sync
 {
 }
 
-/// An error returned by
+/// An error returned by [`try_reserve`](StableList::try_reserve) and the other `try_` functions.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TryReserveError {
+    /// The list could not grow because the maximum capacity would be exceeded.
     CapacityOverflow,
     #[non_exhaustive]
+    /// The list could not grow because the [`allocator`](StableList::allocator) returned an error.
     AllocError {
+        /// The layout of the allocation that failed.
+        ///
+        /// This is useful if you want to call [`handle_alloc_error`].
         layout: Layout,
     },
 }
